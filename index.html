@@ -159,7 +159,8 @@ class Flyer extends Rect{
     super(x,y,26,18);
     this.ox=x; this.range=range; this.sp=speed;
     this.dir=(Math.random()<0.5?-1:1);
-    this.timer=0; this.dropEvery=dropEvery; this.flipProb=flipProb;
+    this.timer=0; this.dropEvery=dropEvery * DROP_SLOWDOWN; this.flipProb=flipProb;
+
     this.jitter=(Math.random()*0.4-0.2);
   }
   update(dt,level,bombs){
@@ -188,6 +189,7 @@ class Gate extends Rect{
 
 /* ===== Level i gradnja ===== */
 const LEVEL={width:12000, platforms:[], flyers:[], bombs:[], gates:[], groundY:520, walkers:[]};
+const DROP_SLOWDOWN = 1.3; // 30% rjeđe bacanje
 
 function buildLevel(){
   LEVEL.platforms.length=0; LEVEL.flyers.length=0; LEVEL.bombs.length=0; LEVEL.gates.length=0; LEVEL.walkers.length=0;
