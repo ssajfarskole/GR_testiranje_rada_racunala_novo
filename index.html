@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Građa računala</title>
+<style>
+  html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial;overflow:hidden}
+  #hud{position:fixed;top:8px;left:8px;right:8px;display:flex;gap:12px;justify-content:center;z-index:3}
+  #hud>div{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:6px 10px}
+  #game{display:block;margin:0 auto;background:#0b1020}
+  /* modal */
+  .overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7);z-index:5}
+  .overlay.show{display:flex}
+  .card{width:min(700px,92vw);background:#0f172a;border:2px solid #1f2b3d;border-radius:14px;padding:20px}
+  .choices{display:grid;gap:8px;margin:10px 0}
+  .choice{display:flex;gap:10px;align-items:center;border:1px solid #334155;background:#0b1220;border-radius:10px;padding:10px}
+  .actions{display:flex;justify-content:flex-end;gap:10px}
+  button{padding:8px 12px;border-radius:10px;border:1px solid #334155;background:#22d3ee;color:#001b2b;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+  <div id="hud">
+    <div>Životi: <span id="lives">7</span></div>
+    <div>Pitanje: <span id="qIdx">1</span>/10</div>
+    <div>Checkpoint: <span id="cp">0</span></div>
+  </div>
+
+  <canvas id="game" width="1024" height="576"></canvas>
+
+  <!-- Start ekran -->
+  <div id="startOverlay" class="overlay">
+    <div class="card">
+      <h3>Građa računala</h3>
+      <p>Pravila: prođi 10 vrata. Svaka vrata otvaraju se točnim odgovorom. Pazi na patrolne kvadrate, leteće kvadrate s bombama i provalije.</p>
+      <p><b>Pritisni Enter za početak.</b></p>
+    </div>
+  </div>
+
+  <!-- Pitanja -->
+  <div id="qOverlay" class="overlay">
+    <div class="card">
+      <h3 id="ovTitle">Pitanje</h3>
+      <p id="ovText"></p>
+      <div id="ovChoices" class="choices"></div>
+      <div class="actions"><button id="ovBtn">Potvrdi</button></div>
+    </div>
+  </div>
+
+<script>
+/* ===== Canvas i HUD ===== */
+const cvs = document.getElementById('game'), ctx = cvs.getContext('2d');
+const livesEl = document.getElementById('lives'), qIdxEl = document.getElementById('qIdx'), cpEl = document.getElementById('cp');
+const startOverlay = document.getElementById('startOverlay');
+const qOverlay = document.getElementById('qOverlay');
+const ovTitle = document.getElementById('ovTitle'), ovText = document.getElementById('ovText'),
+      ovChoices = document.getElementById('ovChoices'), ovBtn = document.getElementById('ovBtn');
+
+const HINT_TEXT = 'Strelice: kretanje, Space/↑: skok. VRATA blokiraju put. Pazi: patrolni, leteći s bombama i provalije.';
+const START_X = 120;
+
+/* ===== Input ===== */
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code]=true;
+  if(!gameStarted && e.code==='Enter'){ gameStarted = true; startOverlay.classList.remove('show'); }
+});
+addEventListener('keyup',   e => keys[e.code]=false);
+function clearInput(){ for(const k in keys) keys[k]=false; }
+
+/* ===== Fizički parametri ===== */
+const GRAV=0.6, JUMP=-12, SPEED=3.2; // originalne vrijednosti
+
+/* ===== Pomocne klase ===== */
+class Rect{ constructor(x,y,w,h){ this.x=x; this.y=y; this.w=w; this.h=h; } }
+function inter(a,b){ return !(a.x+a.w<b.x || b.x+b.w<a.x || a.y+a.h<b.y || b.y+b.h<a.y); }
+
+/* ===== Igrač ===== */
+class Player extends Rect{
+  constructor(x,y){ super(x,y,28,36); this.vx=0; this.vy=0; this.on=false; this.spawnShield=0; }
+  reset(pos){
+    this.x=pos.x; this.y=pos.y; this.vx=0; this.vy=0; this.on=false;
+    this.spawnShield = 0.5; // 0.5 s imuniteta nakon respawna
+  }
+  update(level, dt){
+    const EPS=0.0001;
+    const t = Math.min(dt*60, 2); // normalizacija na 60 FPS
+
+    this.vx=0;
+    if(keys['ArrowLeft'])  this.vx=-SPEED;
+    if(keys['ArrowRight']) this.vx= SPEED;
+    if((keys['Space']||keys['ArrowUp']) && this.on){ this.vy=JUMP; this.on=false; }
+
+    // horizontal
+    this.x+=this.vx * t;
+    for(const p of level.platforms){
+      if(inter(this,p)){
+        if(this.vx>0) this.x=p.x-this.w-EPS;
+        else if(this.vx<0) this.x=p.x+p.w+EPS;
+      }
+    }
+
+    // vertikalno
+    this.vy+=GRAV * t; this.y+=this.vy * t; this.on=false;
+    for(const p of level.platforms){
+      if(inter(this,p)){
+        if(this.vy>0){ this.y=p.y-this.h-EPS; this.vy=0; this.on=true; }
+        else if(this.vy<0){ this.y=p.y+p.h+EPS; this.vy=0; }
+      }
+    }
+
+    // granice svijeta
+    if(this.x<0) this.x=0;
+    if(this.x+this.w>LEVEL.width) this.x=LEVEL.width-this.w;
+
+    // pad u provaliju
+    if(this.y>LEVEL.groundY+220){ killPlayer('pad u provaliju'); }
+
+    // odbrojavanje štita
+    if(this.spawnShield>0) this.spawnShield -= dt;
+  }
+  draw(){
+    // opcionalno: prikaži svjetlije tijekom štita
+    ctx.fillStyle = this.spawnShield>0 ? '#7dd3fc' : '#38bdf8';
+    ctx.fillRect(this.x,this.y,this.w,this.h);
+    ctx.strokeStyle='#e5e7eb'; ctx.lineWidth=2; ctx.strokeRect(this.x+0.5,this.y+0.5,this.w-1,this.h-1);
+  }
+}
+
+/* ===== Patrolni ===== */
+class Walker extends Rect{
+  constructor(minX,maxX,topY,speed){
+    super(minX, topY-20, 28, 20);
+    this.minX=minX; this.maxX=maxX-28;
+    this.sp=speed; this.dir=Math.random()<0.5?1:-1;
+  }
+  update(dt){
+    const t = Math.min(dt*60, 2);
+    this.x += this.sp*this.dir * t;
+    if(this.x<this.minX){ this.x=this.minX; this.dir=1; }
+    if(this.x>this.maxX){ this.x=this.maxX; this.dir=-1; }
+  }
+  draw(){ ctx.fillStyle='#ef4444'; ctx.fillRect(this.x,this.y,this.w,this.h); }
+}
+
+/* ===== Leteći + bombe ===== */
+class Bomb extends Rect{
+  constructor(x,y){ super(x,y,10,14); this.vy=0; this.alive=true; }
+  update(level, dt){
+    const t = Math.min(dt*60, 2);
+    this.vy+=GRAV*1.2 * t; this.y+=this.vy * t;
+    for(const p of level.platforms){ if(inter(this,p)){ this.alive=false; break; } }
+    if(this.y>LEVEL.groundY+220) this.alive=false;
+  }
+  draw(){ ctx.fillStyle='#f97316'; ctx.fillRect(this.x,this.y,this.w,this.h); }
+}
+class Flyer extends Rect{
+  constructor(x,y,range=220,speed=1.2,dropEvery=1.6,flipProb=0.25){
+    super(x,y,26,18);
+    this.ox=x; this.range=range; this.sp=speed;
+    this.dir=(Math.random()<0.5?-1:1);
+    this.timer=0; this.dropEvery=dropEvery; this.flipProb=flipProb;
+    this.jitter=(Math.random()*0.4-0.2);
+  }
+  update(dt,level,bombs){
+    const t = Math.min(dt*60, 2);
+    this.x+=this.sp*this.dir * t;
+    if(Math.abs(this.x-this.ox)>this.range) this.dir*=-1;
+    if(Math.random()<this.flipProb*dt) this.dir*=-1;
+    this.timer+=dt;
+    if(this.timer>=Math.max(0.25,this.dropEvery+this.jitter)){
+      this.timer=0;
+      bombs.push(new Bomb(this.x+this.w/2-5,this.y+this.h));
+    }
+  }
+  draw(){ ctx.fillStyle='#a78bfa'; ctx.fillRect(this.x,this.y,this.w,this.h); }
+}
+
+/* ===== Vrata (gate) ===== */
+class Gate extends Rect{
+  constructor(x){ super(x,0,60,576); this.open=false; }
+  draw(){
+    ctx.fillStyle=this.open?'#10b981':'#f59e0b';
+    ctx.fillRect(this.x, LEVEL.groundY-360, this.w, 360);
+    ctx.fillRect(this.x+10, LEVEL.groundY-60, this.w-20, 20);
+  }
+}
+
+/* ===== Level i gradnja ===== */
+const LEVEL={width:12000, platforms:[], flyers:[], bombs:[], gates:[], groundY:520, walkers:[]};
+
+function buildLevel(){
+  LEVEL.platforms.length=0; LEVEL.flyers.length=0; LEVEL.bombs.length=0; LEVEL.gates.length=0; LEVEL.walkers.length=0;
+
+  // tlo u segmentima (rupe)
+  LEVEL.platforms.push(new Rect(0, LEVEL.groundY, 3000, 40));            // segment 1
+  // rupa 3000..3320
+  LEVEL.platforms.push(new Rect(3320, LEVEL.groundY, 2880, 40));         // segment 2
+  // rupa 6200..6550
+  LEVEL.platforms.push(new Rect(6550, LEVEL.groundY, LEVEL.width-6550, 40)); // segment 3
+
+  // daske iznad tla
+  const planks=[];
+  for(let i=300;i<LEVEL.width;i+=700){
+    const p1=new Rect(i, 460 - ((i/700|0)%2)*40, 220, 16);
+    const p2=new Rect(i+300, 410, 200, 16);
+    LEVEL.platforms.push(p1,p2);
+    planks.push(p1,p2);
+  }
+
+  // WALKERI na podu
+  LEVEL.walkers.push(
+    new Walker(200, 900, LEVEL.groundY, 1.4),
+    new Walker(1100, 1500, LEVEL.groundY, 1.6),
+    new Walker(2300, 2600, LEVEL.groundY, 1.6),
+    new Walker(3500, 3800, LEVEL.groundY, 1.2),
+    new Walker(5100, 5350, LEVEL.groundY, 1.4),
+    new Walker(7400, 7700, LEVEL.groundY, 1.8),
+    // oko rupa
+    new Walker(2850, 2980, LEVEL.groundY, 1.8),
+    new Walker(3380, 3520, LEVEL.groundY, 1.7),
+    new Walker(6120, 6200, LEVEL.groundY, 1.8),
+    new Walker(6600, 6760, LEVEL.groundY, 2.0)
+  );
+
+  // WALKERI na daskama
+  let idx=0;
+  for(const p of planks){
+    if((idx++ % 2)===0){
+      const minX = p.x+12, maxX = p.x+p.w-12;
+      LEVEL.walkers.push(
+        new Walker(minX, maxX, p.y, 1.6),
+        new Walker(minX+60, maxX-40, p.y, 1.5)
+      );
+    }
+  }
+
+  // Leteći
+  LEVEL.flyers.push(
+    new Flyer(1400, 220, 260, 1.8, 0.9, 0.35),
+    new Flyer(1400, 280, 260, 2.1, 0.8, 0.35),
+
+    new Flyer(3160, 180, 240, 2.4, 0.6, 0.45),
+    new Flyer(3160, 250, 240, 2.6, 0.55, 0.45),
+    new Flyer(3300, 210, 260, 2.2, 0.55, 0.40),
+
+    new Flyer(4200, 240, 320, 2.3, 0.7, 0.30),
+    new Flyer(4200, 300, 320, 2.5, 0.65, 0.30),
+    new Flyer(4600, 210, 340, 2.7, 0.6, 0.35),
+
+    new Flyer(6380, 180, 260, 2.6, 0.55, 0.45),
+    new Flyer(6380, 260, 260, 2.8, 0.50, 0.45),
+    new Flyer(6520, 220, 260, 2.9, 0.50, 0.50),
+
+    new Flyer(7400, 200, 320, 2.6, 0.6, 0.35),
+    new Flyer(7400, 300, 320, 2.8, 0.55, 0.35),
+    new Flyer(8200, 240, 300, 2.7, 0.55, 0.30),
+    new Flyer(8200, 300, 300, 2.9, 0.50, 0.30),
+
+    new Flyer(9000, 220, 320, 3.0, 0.5, 0.45),
+    new Flyer(9000, 280, 320, 3.0, 0.5, 0.45),
+    new Flyer(9800, 240, 320, 3.0, 0.5, 0.45),
+    new Flyer(10200, 300, 300, 2.7, 0.55, 0.35)
+  );
+
+  // Gateovi
+  for(let i=0;i<10;i++) LEVEL.gates.push(new Gate(700+i*1000));
+}
+
+/* ===== Siguran spawn ===== */
+function safeSpawn(x, { preferGround=false } = {}){
+  let surfaceY = LEVEL.groundY; let surf = null;
+  for(const p of LEVEL.platforms){
+    const coversX = x >= p.x && x <= p.x+p.w; if(!coversX) continue;
+    if(preferGround){ if(p.h >= 40){ surfaceY = p.y; surf = p; break; } }
+    else { if(!surf || p.y < surfaceY){ surfaceY = p.y; surf = p; } }
+  }
+  if(!surf){
+    const grounds = LEVEL.platforms.filter(p=>p.h>=40);
+    let best=null, bestDist=Infinity;
+    for(const p of grounds){
+      const cx=Math.max(p.x, Math.min(x, p.x+p.w));
+      const d=Math.abs(cx-x);
+      if(d<bestDist){bestDist=d; best=p;}
+    }
+    surf = best || new Rect(0, LEVEL.groundY, LEVEL.width, 40); surfaceY = surf.y;
+  }
+  const padX=20, playerW=28; const left=surf.x+padX; const right=surf.x+surf.w-padX-playerW;
+  const clampedX = Math.max(left, Math.min(x, right));
+  return { x: clampedX, y: surfaceY - 36 };
+}
+
+/* ===== Pitanja ===== */
+const QUESTIONS=[
+  {title:"Dijagnostika računala", text:"Što znači pojam dijagnostika računala?", choices:["Nasumično testiranje","Praćenje rada hardvera i softvera","Čišćenje prašine","Instalacija programa"], correct:1},
+  {title:"Preventivno testiranje", text:"Kada je preventivno testiranje najkorisnije?", choices:["Tek kad se pokvari","Svakih 6 mjeseci ili nakon čišćenja","Samo nova računala","Kad padnu performanse"], correct:1},
+  {title:"CPU temperature (Idle)", text:"Koja je normalna CPU temperatura u idleu?", choices:["10–20 °C","30–45 °C","60–80 °C","85–95 °C"], correct:1},
+  {title:"ATX 12V", text:"Koji je raspon 12V linije ispravan?", choices:["10.8–11.2 V","11.4–12.6 V","12.8–13.2 V","9.5–10.0 V"], correct:1},
+  {title:"SMART Caution", text:"Što znači 'Caution' u SMART dijagnostici diska?", choices:["Disk ispravan","Početak trošenja, potreban backup","Greška drivera","Normalno stanje"], correct:1},
+  {title:"Delta T", text:"Koja delta T ukazuje na problem s hlađenjem?", choices:["<30 °C","30–40 °C",">50 °C","10 °C"], correct:2},
+  {title:"CPU >85 °C", text:"CPU prelazi 85 °C pri opterećenju. Uzrok je najvjerojatnije:", choices:["Prejak ventilator","Loše hlađenje ili stara pasta","Nizak napon","Pogrešan BIOS"], correct:1},
+  {title:"Stres test (CPU)", text:"Koji alat služi za stres test CPU-a?", choices:["CrystalDiskMark","FurMark","Prime95","Cinebench"], correct:2},
+  {title:"Pad benchmarka", text:"Benchmark pad >20% ispod prosjeka znači:", choices:["Normalno","Problem s hlađenjem ili pozadinskim procesima","Prejak OC","Premalo RAM-a"], correct:1},
+  {title:"Skok temp bez opterećenja", text:"Temperatura skače s 50°C na 85°C bez opterećenja, to može značiti:", choices:["Ispravan rad","Mogući nestabilan napon ili senzor","Zagađen sustav","Greška GPU-a"], correct:1}
+];
+
+/* ===== Stanje igre ===== */
+buildLevel();
+let player = new Player(...Object.values(safeSpawn(START_X, { preferGround:true })));
+let camX=0, gameStarted=false, paused=false, lastT=performance.now();
+let lives=7, qIndex=0, currentCP=0;
+let killCooldown = 0; // globalni debounce na smrt
+livesEl.textContent=lives; qIdxEl.textContent=qIndex+1; cpEl.textContent=currentCP;
+startOverlay.classList.add('show');
+
+function shuffle(arr){ for(let i = arr.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
+
+/* ===== Pitanje overlay ===== */
+function showQuestion(idx){
+  paused = true;
+  const q = QUESTIONS[idx];
+  const pairs = q.choices.map((text, i) => ({ text, ok: i === q.correct }));
+  shuffle(pairs);
+
+  ovTitle.textContent = q.title;
+  ovText.textContent  = q.text;
+  ovChoices.innerHTML = "";
+  pairs.forEach((p, i) => {
+    const L = document.createElement('label'); L.className = 'choice';
+    const I = document.createElement('input'); I.type='radio'; I.name='ch'; I.value=i;
+    const S = document.createElement('span');  S.textContent = p.text;
+    L.appendChild(I); L.appendChild(S); ovChoices.appendChild(L);
+  });
+
+  qOverlay.classList.add('show');
+
+  ovBtn.onclick = () => {
+    const sel = document.querySelector('input[name="ch"]:checked');
+    if(!sel) return;
+
+    qOverlay.classList.remove('show');
+    const pickedIndex = parseInt(sel.value, 10);
+    const ok = pairs[pickedIndex].ok;
+
+    if(ok){
+      LEVEL.gates[idx].open = true;
+      qIndex = idx + 1; // eksplicitno napredovanje
+      qIdxEl.textContent = Math.min(qIndex+1, QUESTIONS.length);
+      currentCP = Math.max(currentCP, qIndex);
+      cpEl.textContent = currentCP;
+      if(qIndex >= QUESTIONS.length){
+        alert("Bravo! Završio si dijagnostičku simulaciju.");
+        resetAll();
+        return;
+      }
+    }else{
+      killPlayer('netočan odgovor');
+      return;
+    }
+
+    const resp = currentCP===0
+      ? safeSpawn(START_X, { preferGround:true })
+      : safeSpawn(LEVEL.gates[currentCP-1].x+80, { preferGround:true });
+    clearInput();
+    player.reset(resp);
+    camX = Math.max(0, player.x - cvs.width/2 + player.w/2);
+    paused = false;
+  };
+}
+
+/* ===== Respawn / reset ===== */
+function killPlayer(reason){
+  if(killCooldown>0) return; // već smo “ubijeni” ovaj trenutak
+
+  lives = Math.max(0, lives - 1);
+  livesEl.textContent = lives;
+
+  if(lives<=0){ resetAll(); return; } // bez alert-a
+
+  const resp = currentCP===0
+    ? safeSpawn(START_X, { preferGround:true })
+    : safeSpawn(LEVEL.gates[currentCP-1].x+80, { preferGround:true });
+  clearInput();
+  player.reset(resp); // postavi spawnShield
+  camX = Math.max(0, player.x - cvs.width/2 + player.w/2);
+
+  killCooldown = 0.5; // pola sekunde ne može opet poginuti
+}
+function resetAll(){
+  lives=7; livesEl.textContent=lives;
+  qIndex=0; qIdxEl.textContent=qIndex+1;
+  currentCP=0; cpEl.textContent=currentCP;
+  buildLevel();
+  for(const g of LEVEL.gates) g.open=false;
+  LEVEL.bombs.length=0;
+  clearInput();
+  player.reset(safeSpawn(START_X, { preferGround:true }));
+  camX = 0;
+  gameStarted=false;
+  startOverlay.classList.add('show');
+  paused=false;
+  killCooldown = 0;
+}
+
+/* ===== Petlja ===== */
+function update(dt){
+  if(!gameStarted || paused) return;
+
+  // odbrojavaj killCooldown
+  if(killCooldown>0) killCooldown = Math.max(0, killCooldown - dt);
+
+  player.update(LEVEL, dt);
+
+  // walkers – ubojstvo samo ako nema štita i cooldowna
+  for(const w of LEVEL.walkers){
+    w.update(dt);
+    if(killCooldown<=0 && player.spawnShield<=0 && inter(player,w)){
+      killPlayer('patrolni neprijatelj');
+      return; // prekini frame da ne dođe do dvostrukog kila
+    }
+  }
+
+  // flyers & bombs
+  for(const f of LEVEL.flyers) f.update(dt, LEVEL, LEVEL.bombs);
+  for(const b of LEVEL.bombs){
+    if(!b.alive) continue;
+    b.update(LEVEL, dt);
+    if(killCooldown<=0 && player.spawnShield<=0 && b.alive && inter(player,b)){
+      b.alive=false;
+      killPlayer('bomba');
+      return; // prekini frame
+    }
+  }
+  LEVEL.bombs = LEVEL.bombs.filter(b=>b.alive);
+
+  // gate trigger
+  const gate = LEVEL.gates[qIndex];
+  if(gate && !gate.open){
+    const blocker = new Rect(gate.x, LEVEL.groundY-360, gate.w, 360);
+    if(inter(player, blocker)){ player.x = gate.x - player.w - 0.1; showQuestion(qIndex); }
+  }
+
+  // kamera
+  camX = player.x - cvs.width/2 + player.w/2;
+  if (camX < 0) camX = 0;
+  const maxCam = LEVEL.width - cvs.width;
+  if (camX > maxCam) camX = maxCam;
+}
+
+function draw(){
+  ctx.clearRect(0,0,cvs.width,cvs.height);
+  ctx.fillStyle='#061022'; ctx.fillRect(0,0,cvs.width,cvs.height);
+
+  ctx.save(); ctx.translate(-camX,0);
+
+  ctx.fillStyle='#1f2937'; for(const p of LEVEL.platforms){ ctx.fillRect(p.x,p.y,p.w,p.h); }
+  for(const g of LEVEL.gates) g.draw();
+  for(const w of LEVEL.walkers) w.draw();
+  for(const f of LEVEL.flyers) f.draw();
+  for(const b of LEVEL.bombs) b.draw();
+  player.draw();
+
+  ctx.restore();
+
+  ctx.fillStyle='#e5e7eb'; ctx.font='16px system-ui';
+  const pad=10, boxH=28, x=16, y=cvs.height-boxH-12;
+  const w = ctx.measureText(HINT_TEXT).width + pad*2;
+  ctx.save(); ctx.globalAlpha=0.6; ctx.fillStyle='#0b1220'; ctx.fillRect(x,y,w,boxH); ctx.restore();
+  ctx.fillText(HINT_TEXT, x+pad, y+19);
+}
+
+function loop(ts){
+  const dt = Math.max(0.001, (ts - lastT)/1000 || 0.016);
+  lastT = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+startOverlay.classList.add('show');
+loop();
+</script>
+</body>
+</html>
